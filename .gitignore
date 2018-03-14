@@ -53,6 +53,7 @@ fabric.properties
 
 
 .idea/vcs.xml
+.idea/inspectionProfiles/
 
 .idea/modules.xml
 .idea/review.iml
