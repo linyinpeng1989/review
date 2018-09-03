@@ -288,3 +288,80 @@ public class SimpleRateLimiter {
 }
 ```
 
+#### 10、Redis漏斗限流
+漏斗的剩余空间就代表着当前行为可以持续进行的数量，漏嘴的流水速率代表着系统允许该行为的最大频率。
+```java
+public class FunnelRateLimiter {
+
+  static class Funnel {
+    int capacity;			// 漏斗容量
+    float leakingRate;	// 漏嘴流水速度
+    int leftQuota;			// 剩余漏斗空间
+    long leakingTs;			// 上一次漏水时间
+
+    public Funnel(int capacity, float leakingRate) {
+      this.capacity = capacity;
+      this.leakingRate = leakingRate;
+      this.leftQuota = capacity;
+      this.leakingTs = System.currentTimeMillis();
+    }
+
+    void makeSpace() {
+      long nowTs = System.currentTimeMillis();
+      // 距离上一次漏水过去了多久
+      long deltaTs = nowTs - leakingTs;
+      // 可以腾出不少空间
+      int deltaQuota = (int) (deltaTs * leakingRate);
+      if (deltaQuota < 0) { // 间隔时间太长，整数数字过大溢出
+        this.leftQuota = capacity;
+        this.leakingTs = nowTs;
+        return;
+      }
+      if (deltaQuota < 1) { // 腾出空间太小，最小单位是1
+        return;
+      }
+      // 增加剩余空间、记录漏水时间
+      this.leftQuota += deltaQuota;
+      this.leakingTs = nowTs;
+      // 剩余空间不得高于容量
+      if (this.leftQuota > this.capacity) {
+        this.leftQuota = this.capacity;
+      }
+    }
+
+    boolean watering(int quota) {
+      // 释放空间	
+      makeSpace();
+      if (this.leftQuota >= quota) {
+        this.leftQuota -= quota;
+        return true;
+      }
+      return false;
+    }
+  }
+
+  private Map<String, Funnel> funnels = new HashMap<>();
+
+  public boolean isActionAllowed(String userId, String actionKey, int capacity, float leakingRate) {
+    String key = String.format("%s:%s", userId, actionKey);
+    Funnel funnel = funnels.get(key);
+    if (funnel == null) {
+      funnel = new Funnel(capacity, leakingRate);
+      funnels.put(key, funnel);
+    }
+    return funnel.watering(1); // 需要1个quota
+  }
+}
+```
+
+上述算法无法保证原子性，需要进行适当的加锁控制。而一旦加锁，就意味着会有加锁失败，加锁失败就需要选择重试或者放弃，都会影响性能或者用户体验。Redis 	4.0	提供了一个限流模块 redis-cell，
+它也使用了漏斗算法，并提供了原子的限流指令。
+
+该模块只有1条指令 cl.throttle，它的参数和返回值都略显复杂，接下来让我们来看看这个指令具体该如何使用。
+```java
+cl.throttle laoqian:reply 15   30  60  1                                  
+// key laoqian 键
+// 15 capacity 这是漏斗容量                                   
+// 30 operations / 60 seconds 这是漏水速率                                    
+//  need 1 quota (可选参数，默认值也是1)                              
+```
