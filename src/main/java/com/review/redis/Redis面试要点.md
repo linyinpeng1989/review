@@ -65,3 +65,226 @@ redis的复制功能是支持多个数据库之间的数据同步。一类是主
 - allkeys-random：从数据集（server.db[i].dict）中任意选择数据淘汰
 - no-enviction（驱逐）：禁止驱逐数据
 
+#### 7、 Redis实现分布式锁
+- Redis 2.8之前版本，使用setNx方法设置分布式锁，并使用expire方法设置过期时间，但是setNx与expire不是一个原子操作，存在风险
+- Redis 2.8扩展了set方法，使得setNx与expire可以原子地执行，命令为 SET key value NX EX max-lock-time 或 SET key value NX PX max-lock-time
+- 可重入锁：基于ThreadLocal和引用计数器，对Redis进行简单地封装，从而实现可重入锁。但它加重了客户端的复杂性，在编写业务方法时注意在逻辑结构上进行调整完全可以不使用可重入锁。
+```java
+public class RedisWithReentrantLock {
+
+  private ThreadLocal<Map<String, Integer>> lockers = new ThreadLocal<>();
+
+  private Jedis jedis;
+
+  public RedisWithReentrantLock(Jedis jedis) {
+    this.jedis = jedis;
+  }
+
+  private boolean _lock(String key) {
+    return jedis.set(key, "", "nx", "ex", 5L) != null;
+  }
+
+  private void _unlock(String key) {
+    jedis.del(key);
+  }
+
+  private Map<String, Integer> currentLockers() {
+    Map<String, Integer> refs = lockers.get();
+    if (refs != null) {
+      return refs;
+    }
+    lockers.set(new HashMap<>());
+    return lockers.get();
+  }
+
+  public boolean lock(String key) {
+    Map<String, Integer> refs = currentLockers();
+    Integer refCnt = refs.get(key);
+    if (refCnt != null) {
+      refs.put(key, refCnt + 1);
+      return true;
+    }
+    boolean ok = this._lock(key);
+    if (!ok) {
+      return false;
+    }
+    refs.put(key, 1);
+    return true;
+  }
+
+  public boolean unlock(String key) {
+    Map<String, Integer> refs = currentLockers();
+    Integer refCnt = refs.get(key);
+    if (refCnt == null) {
+      return false;
+    }
+    refCnt -= 1;
+    if (refCnt > 0) {
+      refs.put(key, refCnt);
+    } else {
+      refs.remove(key);
+      this._unlock(key);
+    }
+    return true;
+  }
+
+  public static void main(String[] args) {
+    Jedis jedis = new Jedis();
+    RedisWithReentrantLock redis = new RedisWithReentrantLock(jedis);
+    System.out.println(redis.lock("codehole"));
+    System.out.println(redis.lock("codehole"));
+    System.out.println(redis.unlock("codehole"));
+    System.out.println(redis.unlock("codehole"));
+  }
+
+}
+```
+
+#### 8、 Redis实现延时队列
+延时队列可以通过 Redis 的 zset(有序列表) 来实现。我们将消息序列化成一个字符串作为 zset 的value，这个消息的到期处理时间作为score，然后用多个线程轮询 zset 获取到期的任务进行处理，
+多个线程是为了保障可用性，万一挂了一个线程还有其它线程可以继续处理。因为有多个线程，所以需要考虑并发争抢任务，确保任务不能被多次执行。
+
+Redis 的 zrem 方法是多线程多进程争抢任务的关键，它的返回值决定了当前实例有没有抢到任务，因为 loop 方法可能会被多个线程、多个进程调用，同一个任务可能会被多个进程线程抢到，通过 zrem 来决定唯一的属主。
+同时，我们要注意一定要对 handle_msg 进行异常捕获，避免因为个别任务处理问题导致循环异常退出。
+```java
+import java.lang.reflect.Type;
+import java.util.Set;
+import java.util.UUID;
+
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.TypeReference;
+
+import redis.clients.jedis.Jedis;
+
+public class RedisDelayingQueue<T> {
+
+  static class TaskItem<T> {
+    public String id;
+    public T msg;
+  }
+
+  // fastjson 序列化对象中存在 generic 类型时，需要使用 TypeReference
+  private Type TaskType = new TypeReference<TaskItem<T>>() {
+  }.getType();
+
+  private Jedis jedis;
+  private String queueKey;
+
+  public RedisDelayingQueue(Jedis jedis, String queueKey) {
+    this.jedis = jedis;
+    this.queueKey = queueKey;
+  }
+
+  public void delay(T msg) {
+    TaskItem<T> task = new TaskItem<T>();
+    task.id = UUID.randomUUID().toString(); // 分配唯一的 uuid
+    task.msg = msg;
+    String s = JSON.toJSONString(task); // fastjson 序列化
+    jedis.zadd(queueKey, System.currentTimeMillis() + 5000, s); // 塞入延时队列 ,5s 后再试
+  }
+
+  public void loop() {
+    while (!Thread.interrupted()) {
+      // 只取一条
+      Set<String> values = jedis.zrangeByScore(queueKey, 0, System.currentTimeMillis(), 0, 1);
+      if (values.isEmpty()) {
+        try {
+          Thread.sleep(500); // 歇会继续
+        } catch (InterruptedException e) {
+          break;
+        }
+        continue;
+      }
+      String s = values.iterator().next();
+      if (jedis.zrem(queueKey, s) > 0) { // 抢到了
+        TaskItem<T> task = JSON.parseObject(s, TaskType); // fastjson 反序列化
+        this.handleMsg(task.msg);
+      }
+    }
+  }
+
+  public void handleMsg(T msg) {
+    System.out.println(msg);
+  }
+
+  public static void main(String[] args) {
+    Jedis jedis = new Jedis();
+    RedisDelayingQueue<String> queue = new RedisDelayingQueue<>(jedis, "q-demo");
+    Thread producer = new Thread() {
+
+      public void run() {
+        for (int i = 0; i < 10; i++) {
+          queue.delay("codehole" + i);
+        }
+      }
+
+    };
+    Thread consumer = new Thread() {
+    
+      public void run() {
+        queue.loop();
+      }
+
+    };
+    producer.start();
+    consumer.start();
+    try {
+      producer.join();
+      Thread.sleep(6000);
+      consumer.interrupt();
+      consumer.join();
+    } catch (InterruptedException e) {
+    }
+  }
+}
+```
+
+#### 9、Redis实现简单限流
+使用Redis限流，一般采用string类型存储一个数字并设置过期时间，每次请求递增，在达到阈值时进行错误提示。比如：每分钟最多访问10次，一个用户在第1秒时访问1次，在第59秒时访问9次，如果按照这种方式衡量，
+则用户在第60秒时访问会提示“频繁操作”，但是在第61秒时访问时会重新计算，显然不是很合理。
+
+上述方式无法很好地处理“滑动时间窗口”问题，可以通过 zset 数据结构的 score 值来圈出这个时间窗口。我们只需要保留这个时间窗口，窗口之外的数据都可以砍掉，然后统计 zset 数据结构的元素个数（阈值）即可。
+若要保证统计的元素个数与用户请求个数不会出现偏差，需要保证 zset 的value唯一性，比如uuid（比较浪费空间）、毫秒时间戳等。
+
+缺点：因为要记录时间窗口内所有的行为记录，如果这个量很大，比如限定 60s 内操作不得超过 100w 次这样的参数，它是不适合做这样的限流的，因为会消耗大量的存储空间。
+```java
+public class SimpleRateLimiter {
+
+  private Jedis jedis;
+
+  public SimpleRateLimiter(Jedis jedis) {
+    this.jedis = jedis;
+  }
+
+  public boolean isActionAllowed(String userId, String actionKey, int period, int maxCount) {
+    // 用户 + 操作，确保这两个维度下key唯一性
+    String key = String.format("hist:%s:%s", userId, actionKey);
+    long nowTs = System.currentTimeMillis();
+    // 使用Redis管道命令，提高操作效率
+    Pipeline pipe = jedis.pipelined();
+    // 标记一个事务块的开始
+    pipe.multi();
+    // 添加元素
+    pipe.zadd(key, nowTs, "" + nowTs);
+    // 批量移除时间范围外的元素（比方说1分钟）
+    pipe.zremrangeByScore(key, 0, nowTs - period * 1000);
+    // 获取zset中的元素个数
+    Response<Long> count = pipe.zcard(key);
+    pipe.expire(key, period + 1);
+    pipe.exec();
+    pipe.close();
+    // 判断是否超过阈值
+    return count.get() <= maxCount;
+  }
+
+  public static void main(String[] args) {
+    Jedis jedis = new Jedis();
+    SimpleRateLimiter limiter = new SimpleRateLimiter(jedis);
+    for(int i=0;i<20;i++) {
+      System.out.println(limiter.isActionAllowed("laoqian", "reply", 60, 5));
+    }
+  }
+
+}
+```
+
