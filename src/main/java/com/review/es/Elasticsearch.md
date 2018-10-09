@@ -292,7 +292,7 @@ GET /bank/_validate/query?explain
 GET /_analyze
 {
   "analyzer": "ik_max_word",
-  "text": "中华人名共和国国歌"
+  "text": "中华人民共和国国歌"
 }
 ```
 
@@ -325,7 +325,7 @@ GET /_analyze
     - 字段长度准则：字段的长度是多少？长度越长，相关性越低。 检索词出现在一个短的 title 要比同样的词出现在一个长的 content 字段权重更大。
     ```
      GET /bank/_doc/_search?explain=true
-     {
+    {
      	"query": {
      		"bool": {
      			"must": {"match": {"firstname": "Miller"}},
@@ -337,7 +337,7 @@ GET /_analyze
      			"filter": {"range": {"balance": {"gt": 10000}}}
      		}
      	}
-     }
+    }
     ```
 
 - Doc Values：倒排索引的检索性能非常快，但是在字段值排序时却不是理想的结构。如果想要实现高效地排序，需要转置倒排索引（列存储），即将所有单字段的值存储在单数据列中。在 Elasticsearch 中，
