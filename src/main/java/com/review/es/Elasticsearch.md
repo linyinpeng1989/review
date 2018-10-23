@@ -6,25 +6,25 @@
 
 - 索引实际上是一个或多个物理分片的逻辑命名空间，用于保存相关的数据。而分片是底层的工作单元，仅保存全部数据中的一部分，其本身是一个Lucene的实例。
 
-- 副本分片只是主分片的拷贝，作为硬件故障时保护数据不丢失的冗余备份，并为搜索和返回文档等读操作提供服务。（负载）
+- replica shard只是primary shard的拷贝，作为硬件故障时保护数据不丢失的冗余备份，并为搜索和返回文档等读操作提供服务(负载)。primary shard 及其对应的 replica shard组成一个replication group。
 
-- 主分片数在索引建立的时候确定，用于数据平均分布时的取模操作，不能修改；副本分片数可以随时修改。
+- primary shard数量在索引建立的时候确定，用于数据平均分布时的取模操作，不能修改；replica shard数量可以随时修改。
 ```
 shard = hash(routing) % number_of_primary_shards
 
-routing 是一个可变值，默认是文档的 _id ，也可以设置成一个自定义的值。 routing 通过 hash 函数生成一个数字，然后这个数字再除以 number_of_primary_shards （主分片的数量）后得到 余数 。
+routing 是一个可变值，默认是文档的 _id ，也可以设置成一个自定义的值。 routing 通过 hash 函数生成一个数字，然后这个数字再除以 number_of_primary_shards （primary shard数量）后得到余数 。
 ```
 
-- 主分片不能和它的副本分片存在于同一节点上。
+- primary shard不能和它的replica shard存在于同一节点上（容错考虑）。
 
-- 用户可以将请求发送到集群中的任何节点（包括主节点），每个节 点都知道任意文档所处的位置，并且能够将我们的请求直接转发到存储我们所需文档的节点。
+- 用户可以将请求发送到集群中的任何节点，每个节点都知道任意文档所处的位置，并且能够将我们的请求直接转发到存储我们所需文档的shard。
 
 - 每个文档都有一个版本号_version，每次对文档进行修改或删除时递增，用于乐观并发控制（处理冲突）。在请求中指定version，若与服务器版本一致才更新，可以确保应用中相互冲突的变更不会导致数据丢失
 （如果旧版本的文档在新版本之后到达，可以简单地进行忽略）
 
-- 新建、修改和删除（索引、文档）均是写操作，必须在主分片上面完成之后才能被复制到相关的副本分片。
+- 新建、修改和删除（索引、文档）均是写操作，请求必须在primary shard上面完成之后才能被转发到相应的replica shard。
 
-- 在处理读取请求时，协调结点在每次请求的时候都会通过轮询所有副本分片来达到负载均衡。
+- 在处理读取请求时，协调结点在每次请求的时候都会通过轮询replication group中所有分片来达到负载均衡。
 
 #### 2、Elasticsearch水平扩容
 - 在创建索引时，primary shard的数目就已经确定下来了。实际上，这个数目定义了这个索引能够存储的最大数据量。但是读操作（搜索和返回数据）可以同时被primary shard或replica shard所处理，
@@ -32,12 +32,57 @@ routing 是一个可变值，默认是文档的 _id ，也可以设置成一个�
 - 当然，如果只是在相同节点数目的集群上增加更多的replica shard并不能提高性能，因为每个分片从节点上获得的资源会变少。因此需要增加更多的硬件资源来提升吞吐量。
 - 水平扩容的极限：所有primary shard和replica shard数量之和。此时，若还需要进一步扩容，则可以修改replica shard的数量。
 
-#### 4、副本分片容错
+#### 3、副本分片容错
 - ①集群中某一节点宕机，若该节点为master节点，则跳转到②，若不是master节点，则直接跳转到③
 - ②自动从剩余节点中选择一个节点作为新的master节点
-- ③master如果发现宕机的节点中存在primary shard
+- ③master如果发现宕机的节点中存在primary shard，则从其他节点中随机选取一个replica shard并将其升级为primary shard
+- ④重启宕机的节点，其内均变为replica shard，它们会在既有的内容基础上，从primary shard同步宕机后的更新内容（部分同步），同步完成后方可正常提供服务。
 
-#### 3、搜索知识点
+#### 4、Elasticsearch路由
+Elasticsearch是如何知道文档属于哪个分片的呢？实际上Elasticsearch根据下面这个简单的算法决定：
+```
+shard = hash(routing) % number_of_primary_shards
+```
+routing值是一个任意字符串，默认是_id元数据，也可以自己指定。routing字符串通过哈希函数生成一个数字，然后除以主切片的数量得到一个余数(remainder)，余数的范围永远是0到number_of_primary_shards - 1，这个
+数字就是特定文档所在的分片。这也解释了为什么主分片的数量只能在创建索引时定义且不能修改：如果主分片的数量在未来改变了，所有先前的路由值就失效了，文档也就永远找不到了。
+
+#### 4、Elasticsearch写模型
+- 发送请求到集群中某个Elasticsearch节点（接收请求的节点成为协调节点）
+- 协调节点路由请求（默认根据_id的hash值，与primary shard数取模）到相应的primary shard
+- primary shard校验请求结构是否有效
+- primary shard本地执行写操作
+- primary shard执行成功后，同步转发请求到每个replica shard（若有多个replica shard，并行执行）
+- 当所有的replica shard执行成功并把响应发送到primary shard，primary shard通知客户端成功执行
+
+```
+wait_for_active_shards是在Elasticsearch 5.0后取代consistency参数，表示等待活动的分片（至少wait_for_active_shards个分片处于active状态，写操作才会执行）
+```
+
+
+```
+异常情况：
+①如果primary shard执行失败，请求将会等待master将该primary shard的其中一个replica shard提升为新的primary shard，然后将请求转发到新的primary shard执行。
+②如果primary shard执行成功，而replica shard中存在失败情况时，primary shard发送通知给master，master接收到通知后，会将有问题的replica shard移除出in-sync replica set。移除之后master会重新选择一个node
+并重新构建replica shard，以保持集群健康状态。
+```
+
+#### 5、Elasticsearch读模型
+- 发送请求到集群中某个Elasticsearch节点（接收请求的节点成为协调节点）
+- 协调节点解析请求，获得请求相应的shard（多个replication group，每个replication group包含一个primary shard 和 N个replica shard）
+- 对于每个replication group，协调节点默认使用轮询的方式选择一个shard（primary shard 或 replica shard）转发请求。
+- 每个接收到请求的shard执行搜索并返回该shard的查询子集给协调节点
+- 协调节点汇总所有接收请求的shard结果并全局排序，从而获取实际查询结果/列表（非完整文档），并向各个接收请求的shard发送请求获取完整的文档。
+- 协调节点接收所有的完整文档，并返回给客户端
+
+如果使用ID查询文档详情，流程简化（不需要分布式搜索、结果聚合等操作）。
+
+
+```
+异常情况：
+如果发生异常情况，协调节点将会选择同一primary shard的其他节点（primary shard 或 replica shard）发送请求。
+```
+
+#### 5、搜索知识点
 - 倒排索引由文档中所有不重复词的列表构成（分析文档全文域_all），它会保存每一个词项出现过的文档总数， 在对应的文档中一个具体词项出现的总次数，词项在文档中的顺序，每个文档的长度，所有文档的平均
 长度等等。
 

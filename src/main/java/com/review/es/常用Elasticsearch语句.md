@@ -11,6 +11,38 @@ PUT /house
 
 - 指定映射（索引不存在时报错）
 ```
+PUT /house
+{
+  "mappings": {
+    "villa": {
+      "properties": {
+        "address1": {
+          "type": "text",
+          "analyzer": "ik_smart"
+        },
+        "address2": {
+          "type": "text",
+          "analyzer": "ik_max_word"
+        },
+        "location": {
+          "type": "geo_point"
+        },
+        "house_name": {
+          "type": "text",
+          "analyzer": "standard"
+        },
+        "city": {
+          "type": "keyword"
+        },
+        "floor": {
+          "type": "long"
+        }
+      }
+    }
+  }
+}
+
+<!-- 创建或更新 -->
 PUT /house/_mappings/villa
 {
     "properties": {
@@ -280,5 +312,15 @@ GET /_analyze
 {
   "analyzer": "ik_max_word",
   "text": "中华人民共和国国歌"
+}
+```
+
+- 测试索引中某个字段的分词结果
+```
+<!-- 分析bank索引的address字段的分词结果 -->
+GET /bank/_analyze
+{
+  "field": "address",
+  "text": "London Miller Streat 190#"
 }
 ```
