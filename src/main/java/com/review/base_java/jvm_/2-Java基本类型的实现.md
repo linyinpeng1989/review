@@ -43,9 +43,9 @@ public class Foo {
 ##### ②针对全局变量（堆）
 对于byte、char以及short这三种类型的字段或者数组单元，它们在堆上占用的空间分别为一字节、两字节以及两字节。因此，当我们将一个Int类型的值存储到这些类型的字段或者数组时，相当于做了一次隐式的掩码
 操作（高两位的字节会被截取掉）。boolean字段和boolean数组则比较特殊，在HotSpot中boolean类型占用一个字节，而boolean数组则直接用byte数组来实现的。为了保证堆的boolean类型值是合法的，HotSpot在将一个
-Int类型的值存储到boolean字段或数组时，显式地进行掩码操作（比如boolean = 3，二进制位11，进行掩码操作获取低位0，因此在堆中存储的boolean值为1，即表示true）。也就是说，只取最后一位的值存入boolean字段或数组中。
+Int类型的值存储到boolean字段或数组时，显式地进行掩码操作（比如boolean = 3，二进制位11，进行掩码操作获取低位1，因此在堆中存储的boolean值为1，即表示true）。也就是说，只取最后一位的值存入boolean字段或数组中。
 
-在将 boolean、byte、char 以及 short 的值存入字段或者数组单元时（不包含局部变量），Java 虚拟机会进行掩码操作。在读取时，Java 虚拟机则会将其扩展为 int 类型。
+在将 boolean、byte、char 以及 short 的值存入字段或者数组单元时（不包含局部变量），Java 虚拟机会进行掩码操作。在读取时（加载到操作数栈中），Java 虚拟机则会将其扩展为 int 类型。
 
 
 
