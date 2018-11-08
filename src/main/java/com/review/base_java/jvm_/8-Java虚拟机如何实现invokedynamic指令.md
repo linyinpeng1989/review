@@ -1,6 +1,6 @@
 [《深入拆解 Java 虚拟机》08 | JVM是怎么实现invokedynamic的？（上）](https://time.geekbang.org/column/article/12564)
 
-[《深入拆解 Java 虚拟机》08 | JVM是怎么实现invokedynamic的？（下）](https://time.geekbang.org/column/article/12574)
+[《深入拆解 Java 虚拟机》09 | JVM是怎么实现invokedynamic的？（下）](https://time.geekbang.org/column/article/12574)
 ---
 
 在Java中，方法调用会被编译为invokestatic、invokespecial、invokevirtual 以及 invokeinterface 四种指令。这些指令与包含目标方法类名、方法名以及方法描述符的符号引用捆绑。在实际运行之前，Java虚拟机将
